@@ -23,6 +23,38 @@
 #include "AbilitySystemInterface.h"
 #include "Abilities/GameplayAbility.h"
 
+namespace CannonFireContext
+{
+	FGameplayTag ResolveTeam(const AActor* Actor)
+	{
+		if (!Actor)
+		{
+			return FGameplayTag();
+		}
+
+		if (const IAbilitySystemInterface* AbilitySystemInterface = Cast<IAbilitySystemInterface>(Actor))
+		{
+			if (const UAbilitySystemComponent* ASC = AbilitySystemInterface->GetAbilitySystemComponent())
+			{
+				if (ASC->HasMatchingGameplayTag(Team_Enemy))
+				{
+					return Team_Enemy;
+				}
+				if (ASC->HasMatchingGameplayTag(Team_Player))
+				{
+					return Team_Player;
+				}
+			}
+		}
+
+		if (Actor->ActorHasTag(TEXT("Enemy")))
+		{
+			return Team_Enemy;
+		}
+		return Actor->IsA<AShip>() ? Team_Player : FGameplayTag();
+	}
+}
+
 ACannon::ACannon()
 {
 	PrimaryActorTick.bCanEverTick = true;
@@ -53,6 +85,7 @@ ACannon::ACannon()
 	InteractableComponent = CreateDefaultSubobject<UInteractableComponent>(TEXT("InteractableComponent"));
 	InteractableComponent->SetupAttachment(RootComponent);
 	InteractableComponent->SetCollisionProfileName(TEXT("Interactable"));
+	InteractableComponent->InteractionTag = Interaction_CannonBoard;
 
 	bReplicates = true;
 	SetReplicateMovement(false); // We replicate rotations manually via AimRotation
@@ -61,6 +94,13 @@ ACannon::ACannon()
 void ACannon::BeginPlay()
 {
 	Super::BeginPlay();
+
+	// Blueprint reparenting can preserve an old empty component override.
+	// Every Cannon variant must emit the CannonBoard interaction event.
+	if (InteractableComponent && !InteractableComponent->InteractionTag.IsValid())
+	{
+		InteractableComponent->InteractionTag = Interaction_CannonBoard;
+	}
 
 	// Capture initial rotations
 	if (BaseMesh)
@@ -173,6 +213,40 @@ AShip* ACannon::GetOwningShip() const
 	return nullptr;
 }
 
+bool ACannon::IsCannonDisabled() const
+{
+	return IsActorBeingDestroyed() || IsOwningShipCannonDisabled();
+}
+
+bool ACannon::GetRequiredAimAtWorldLocation(
+	const FVector& WorldLocation,
+	float& OutPitch,
+	float& OutYaw) const
+{
+	const FVector LocalDirection = GetActorTransform()
+		.InverseTransformVectorNoScale(WorldLocation - GetActorLocation())
+		.GetSafeNormal();
+	if (LocalDirection.IsNearlyZero())
+	{
+		return false;
+	}
+
+	const FRotator RequiredRotation = LocalDirection.Rotation();
+	OutPitch = FRotator::NormalizeAxis(RequiredRotation.Pitch);
+	OutYaw = FRotator::NormalizeAxis(RequiredRotation.Yaw);
+	return FMath::IsFinite(OutPitch) && FMath::IsFinite(OutYaw);
+}
+
+bool ACannon::CanAimAtWorldLocation(const FVector& WorldLocation) const
+{
+	float RequiredPitch = 0.0f;
+	float RequiredYaw = 0.0f;
+	return GetRequiredAimAtWorldLocation(WorldLocation, RequiredPitch, RequiredYaw)
+		&& RequiredPitch >= MinPitch
+		&& RequiredPitch <= MaxPitch
+		&& FMath::Abs(RequiredYaw) <= MaxYawOffset;
+}
+
 void ACannon::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
 {
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
@@ -183,23 +257,26 @@ void ACannon::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeP
 }
 
 // Ship의 Board()와 완전히 동일한 패턴
-void ACannon::Board(APawn* PlayerPawn)
+bool ACannon::Board(APawn* PlayerPawn)
 {
 	UE_LOG(LogTemp, Log, TEXT("ACannon::Board - [SERVER] Entered. PlayerPawn: %s, HasAuthority: %s, RidingPlayer: %s"),
 		PlayerPawn ? *PlayerPawn->GetName() : TEXT("None"),
 		HasAuthority() ? TEXT("YES") : TEXT("NO"),
 		RidingPlayer ? *RidingPlayer->GetName() : TEXT("None"));
 
-	if (!HasAuthority()) return;
+	if (!HasAuthority())
+	{
+		return false;
+	}
 	if (!PlayerPawn)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("ACannon::Board - [SERVER] Failed: PlayerPawn is null!"));
-		return;
+		return false;
 	}
 	if (RidingPlayer)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("ACannon::Board - [SERVER] Failed: Cannon is already being ridden by %s!"), *RidingPlayer->GetName());
-		return;
+		return false;
 	}
 
 	APlayerController* PC = Cast<APlayerController>(PlayerPawn->GetController());
@@ -208,7 +285,11 @@ void ACannon::Board(APawn* PlayerPawn)
 		UE_LOG(LogTemp, Warning, TEXT("ACannon::Board - [SERVER] Failed: PlayerPawn has no PlayerController! Pawn: %s, Controller: %s"),
 			*PlayerPawn->GetName(),
 			PlayerPawn->GetController() ? *PlayerPawn->GetController()->GetName() : TEXT("None"));
-		return;
+		return false;
+	}
+	if (!CanBoard(PlayerPawn))
+	{
+		return false;
 	}
 
 	UE_LOG(LogTemp, Log, TEXT("ACannon: [SERVER] Board initiated by player pawn %s. Cannon location: %s, Player location: %s"), *PlayerPawn->GetName(), *GetActorLocation().ToString(), *PlayerPawn->GetActorLocation().ToString());
@@ -239,6 +320,28 @@ void ACannon::Board(APawn* PlayerPawn)
 
 	// Possess cannon pawn (Ship의 Board와 동일)
 	PC->Possess(this);
+	OnPlayerBoarded(PlayerPawn);
+	return true;
+}
+
+bool ACannon::CanBoard(APawn* PlayerPawn) const
+{
+	return PlayerPawn
+		&& !RidingPlayer
+		&& Cast<APlayerController>(PlayerPawn->GetController()) != nullptr;
+}
+
+void ACannon::OnPlayerBoarded(APawn* PlayerPawn)
+{
+}
+
+void ACannon::OnPlayerExited(APawn* PlayerPawn)
+{
+}
+
+APawn* ACannon::ResolveFiringOperator() const
+{
+	return RidingPlayer;
 }
 
 void ACannon::HandleLook(const FInputActionValue& Value)
@@ -382,31 +485,40 @@ void ACannon::ExitAimMode()
 	if (!HasAuthority()) return;
 	if (!RidingPlayer) return;
 
+	APawn* ExitingPlayer = RidingPlayer;
 	APlayerController* PC = Cast<APlayerController>(GetController());
-	if (!PC) return;
 
-	UE_LOG(LogTemp, Log, TEXT("ACannon: [SERVER] ExitAimMode initiated. Player pawn: %s"), *RidingPlayer->GetName());
+	UE_LOG(LogTemp, Log, TEXT("ACannon: [SERVER] ExitAimMode initiated. Player pawn: %s"), *ExitingPlayer->GetName());
 
 	// Detach player preserving their current world position on the cannon
-	RidingPlayer->DetachFromActor(FDetachmentTransformRules::KeepWorldTransform);
-	UE_LOG(LogTemp, Log, TEXT("ACannon: [SERVER] ExitAimMode - Detached player. World location: %s"), *RidingPlayer->GetActorLocation().ToString());
+	ExitingPlayer->DetachFromActor(FDetachmentTransformRules::KeepWorldTransform);
+	UE_LOG(LogTemp, Log, TEXT("ACannon: [SERVER] ExitAimMode - Detached player. World location: %s"), *ExitingPlayer->GetActorLocation().ToString());
 
-	RidingPlayer->SetActorEnableCollision(true);
-	RidingPlayer->SetActorHiddenInGame(false);
+	ExitingPlayer->SetActorEnableCollision(true);
+	ExitingPlayer->SetActorHiddenInGame(false);
 
-	if (ACharacter* Char = Cast<ACharacter>(RidingPlayer))
+	if (ACharacter* Char = Cast<ACharacter>(ExitingPlayer))
 	{
 		Char->GetCharacterMovement()->SetMovementMode(MOVE_Walking);
 	}
 
 	// Restore movement replication on exit
-	RidingPlayer->SetReplicateMovement(true);
-	UE_LOG(LogTemp, Log, TEXT("ACannon: [SERVER] ExitAimMode - Player bReplicateMovement after enable: %s"), RidingPlayer->IsReplicatingMovement() ? TEXT("True") : TEXT("False"));
+	ExitingPlayer->SetReplicateMovement(true);
+	UE_LOG(LogTemp, Log, TEXT("ACannon: [SERVER] ExitAimMode - Player bReplicateMovement after enable: %s"), ExitingPlayer->IsReplicatingMovement() ? TEXT("True") : TEXT("False"));
 
 	// Return possession to player character (Ship의 Disembark와 동일)
-	PC->Possess(RidingPlayer);
+	if (PC)
+	{
+		PC->Possess(ExitingPlayer);
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("ACannon::ExitAimMode - Cannon has no PlayerController; player state was restored without possession."));
+	}
 
 	RidingPlayer = nullptr;
+	OnPlayerExited(ExitingPlayer);
 }
 
 void ACannon::ForceExit()
@@ -498,7 +610,7 @@ void ACannon::SpawnCannonball(FVector MuzzleLocation, FRotator LaunchRotation, f
 
 	FActorSpawnParameters SpawnParams;
 	SpawnParams.Owner = OwningShip ? Cast<AActor>(OwningShip) : Cast<AActor>(this);
-	SpawnParams.Instigator = RidingPlayer; // The player who controls the cannon (might be null for AI)
+	SpawnParams.Instigator = ResolveFiringOperator();
 	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 
 	AActor* SpawnedProjectile = GetWorld()->SpawnActor<AActor>(SelectedProjectileClass, MuzzleLocation, LaunchRotation, SpawnParams);
@@ -512,7 +624,17 @@ void ACannon::SpawnCannonball(FVector MuzzleLocation, FRotator LaunchRotation, f
 					ActiveWaterBombEffectDurationSeconds,
 					ActiveWaterBombAttackSpeedMultiplier);
 			}
-			Projectile->InitializeProjectile(OwningShip, Damage, Speed);
+			FCannonFireContext FireContext;
+			FireContext.MountShip = OwningShip;
+			FireContext.Operator = ResolveFiringOperator();
+			FireContext.SourceTeam = CannonFireContext::ResolveTeam(FireContext.Operator);
+			if (!FireContext.SourceTeam.IsValid())
+			{
+				FireContext.SourceTeam = CannonFireContext::ResolveTeam(OwningShip);
+			}
+			FireContext.Damage = Damage;
+			FireContext.ProjectileSpeed = Speed;
+			Projectile->InitializeProjectile(FireContext);
 		}
 
 		if (bWaterBombMode)

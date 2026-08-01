@@ -6,11 +6,50 @@
 #include "GameFramework/ProjectileMovementComponent.h"
 #include "Ship.h"
 #include "AbilitySystemComponent.h"
+#include "AbilitySystemInterface.h"
 #include "GameplayEffect.h"
 #include "DrawDebugHelpers.h"
 #include "WaterBodyActor.h"
 #include "BaseAttributeSet.h"
 #include "CollisionChannels.h"
+#include "BaseGameplayTags.h"
+#include "GASCombatLibrary.h"
+#include "GameFramework/Pawn.h"
+
+namespace CannonballDamage
+{
+	UAbilitySystemComponent* ResolveASC(const AActor* Actor)
+	{
+		const IAbilitySystemInterface* AbilitySystemInterface = Cast<IAbilitySystemInterface>(Actor);
+		return AbilitySystemInterface ? AbilitySystemInterface->GetAbilitySystemComponent() : nullptr;
+	}
+
+	FGameplayTag ResolveTeam(const AActor* Actor)
+	{
+		if (!Actor)
+		{
+			return FGameplayTag();
+		}
+
+		if (const UAbilitySystemComponent* ASC = ResolveASC(Actor))
+		{
+			if (ASC->HasMatchingGameplayTag(Team_Enemy))
+			{
+				return Team_Enemy;
+			}
+			if (ASC->HasMatchingGameplayTag(Team_Player))
+			{
+				return Team_Player;
+			}
+		}
+
+		if (Actor->ActorHasTag(TEXT("Enemy")))
+		{
+			return Team_Enemy;
+		}
+		return Actor->IsA<AShip>() ? Team_Player : FGameplayTag();
+	}
+}
 
 ACannonball::ACannonball()
 {
@@ -130,12 +169,29 @@ void ACannonball::SetDesignatedImpactLocation(const FVector& InImpactLocation, f
 
 void ACannonball::InitializeProjectile(AShip* InLaunchingShip, float InDamage, float InSpeed)
 {
-	LaunchingShip = InLaunchingShip;
-	DamageAmount = InDamage;
-
-	if (SphereCollision && InLaunchingShip)
+	FCannonFireContext LegacyContext;
+	LegacyContext.MountShip = InLaunchingShip;
+	LegacyContext.Operator = GetInstigator();
+	LegacyContext.SourceTeam = CannonballDamage::ResolveTeam(LegacyContext.Operator);
+	if (!LegacyContext.SourceTeam.IsValid())
 	{
-		const bool bEnemyProjectile = InLaunchingShip->ActorHasTag(TEXT("Enemy"));
+		LegacyContext.SourceTeam = CannonballDamage::ResolveTeam(InLaunchingShip);
+	}
+	LegacyContext.Damage = InDamage;
+	LegacyContext.ProjectileSpeed = InSpeed;
+	InitializeProjectile(LegacyContext);
+}
+
+void ACannonball::InitializeProjectile(const FCannonFireContext& InFireContext)
+{
+	FireContext = InFireContext;
+	LaunchingShip = InFireContext.MountShip;
+	DamageAmount = InFireContext.Damage;
+	const float InSpeed = InFireContext.ProjectileSpeed;
+
+	if (SphereCollision)
+	{
+		const bool bEnemyProjectile = FireContext.SourceTeam.MatchesTagExact(Team_Enemy);
 		SphereCollision->SetCollisionProfileName(
 			bEnemyProjectile ? TEXT("EnemyCannonball") : TEXT("PlayerCannonball"),
 			false);
@@ -147,10 +203,14 @@ void ACannonball::InitializeProjectile(AShip* InLaunchingShip, float InDamage, f
 		// actor overlap used by URippleSubsystem.
 		SphereCollision->SetCollisionResponseToChannel(ECC_WorldStatic, ECR_Overlap);
 		SphereCollision->SetCollisionResponseToChannel(ECC_ShipDamage, ECR_Block);
+		SphereCollision->SetCollisionResponseToChannel(ECC_Pawn, ECR_Block);
 		SphereCollision->SetGenerateOverlapEvents(true);
 		SphereCollision->SetNotifyRigidBodyCollision(true);
 
-		SphereCollision->IgnoreActorWhenMoving(InLaunchingShip, true);
+		if (LaunchingShip)
+		{
+			SphereCollision->IgnoreActorWhenMoving(LaunchingShip, true);
+		}
 		if (AActor* OwnerActor = GetOwner())
 		{
 			SphereCollision->IgnoreActorWhenMoving(OwnerActor, true);
@@ -158,6 +218,10 @@ void ACannonball::InitializeProjectile(AShip* InLaunchingShip, float InDamage, f
 		if (APawn* InstigatorPawn = GetInstigator())
 		{
 			SphereCollision->IgnoreActorWhenMoving(InstigatorPawn, true);
+		}
+		if (FireContext.Operator && FireContext.Operator != GetInstigator())
+		{
+			SphereCollision->IgnoreActorWhenMoving(FireContext.Operator, true);
 		}
 
 		SphereCollision->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
@@ -222,6 +286,18 @@ void ACannonball::OnHit(
 
 		bHasProcessedShipHit = true;
 		HandleShipHit(HitShip);
+		return;
+	}
+
+	if (APawn* HitPawn = Cast<APawn>(OtherActor))
+	{
+		if (bHasProcessedCharacterHit)
+		{
+			return;
+		}
+
+		bHasProcessedCharacterHit = true;
+		HandleCharacterHit(HitPawn, Hit);
 	}
 }
 
@@ -232,10 +308,7 @@ void ACannonball::HandleShipHit(AShip* HitShip)
 		return;
 	}
 
-	// Collision responses already enforce this, but keep a gameplay-level team
-	// check so a bad Blueprint collision override can never cause friendly fire.
-	if (LaunchingShip
-		&& LaunchingShip->ActorHasTag(TEXT("Enemy")) == HitShip->ActorHasTag(TEXT("Enemy")))
+	if (IsFriendlyTarget(HitShip))
 	{
 		return;
 	}
@@ -243,21 +316,8 @@ void ACannonball::HandleShipHit(AShip* HitShip)
 	// Preserve the existing GAS damage path exactly; only contact detection changed.
 	DrawDebugSphere(GetWorld(), GetActorLocation(), 100.0f, 12, FColor::Red, false, 2.0f);
 
+	ApplyDamageToActor(HitShip, nullptr);
 	UAbilitySystemComponent* TargetASC = HitShip->GetAbilitySystemComponent();
-	if (TargetASC && DamageGEClass)
-	{
-		FGameplayEffectContextHandle EffectContext = TargetASC->MakeEffectContext();
-		EffectContext.AddInstigator(GetInstigator(), this);
-
-		FGameplayEffectSpecHandle SpecHandle = TargetASC->MakeOutgoingSpec(DamageGEClass, 1.0f, EffectContext);
-		if (SpecHandle.IsValid())
-		{
-			SpecHandle.Data.Get()->SetSetByCallerMagnitude(
-				FGameplayTag::RequestGameplayTag(FName("Data.Damage")),
-				DamageAmount);
-			TargetASC->ApplyGameplayEffectSpecToSelf(*SpecHandle.Data.Get());
-		}
-	}
 
 	float CurrentHealth = 0.0f;
 	if (TargetASC)
@@ -271,6 +331,66 @@ void ACannonball::HandleShipHit(AShip* HitShip)
 		DamageAmount,
 		CurrentHealth);
 	Destroy();
+}
+
+void ACannonball::HandleCharacterHit(APawn* HitPawn, const FHitResult& Hit)
+{
+	if (!HasAuthority() || !HitPawn || IsFriendlyTarget(HitPawn))
+	{
+		return;
+	}
+
+	if (ApplyDamageToActor(HitPawn, &Hit))
+	{
+		Destroy();
+	}
+}
+
+bool ACannonball::IsFriendlyTarget(const AActor* TargetActor) const
+{
+	if (!TargetActor || TargetActor == FireContext.Operator || TargetActor == GetInstigator())
+	{
+		return true;
+	}
+
+	const FGameplayTag TargetTeam = CannonballDamage::ResolveTeam(TargetActor);
+	return FireContext.SourceTeam.IsValid()
+		&& TargetTeam.IsValid()
+		&& FireContext.SourceTeam.MatchesTagExact(TargetTeam);
+}
+
+bool ACannonball::ApplyDamageToActor(AActor* TargetActor, const FHitResult* HitResult)
+{
+	UAbilitySystemComponent* TargetASC = CannonballDamage::ResolveASC(TargetActor);
+	UAbilitySystemComponent* SourceASC = CannonballDamage::ResolveASC(FireContext.Operator);
+	if (!SourceASC)
+	{
+		SourceASC = CannonballDamage::ResolveASC(LaunchingShip);
+	}
+	if (!TargetASC || !SourceASC || !DamageGEClass)
+	{
+		return false;
+	}
+
+	AActor* InstigatorActor = FireContext.Operator
+		? Cast<AActor>(FireContext.Operator)
+		: Cast<AActor>(LaunchingShip);
+	const FGameplayEffectSpecHandle SpecHandle = UGASCombatLibrary::MakeDamageEffectSpec(
+		SourceASC,
+		DamageGEClass,
+		DamageAmount,
+		InstigatorActor,
+		this,
+		1,
+		HitResult != nullptr,
+		HitResult ? *HitResult : FHitResult());
+	if (!SpecHandle.IsValid())
+	{
+		return false;
+	}
+
+	TargetASC->ApplyGameplayEffectSpecToSelf(*SpecHandle.Data.Get());
+	return true;
 }
 
 void ACannonball::TriggerWaterRipple(const FVector& HitLocation)

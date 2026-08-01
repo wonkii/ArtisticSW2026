@@ -6,6 +6,7 @@
 #include "Weapon/WeaponDataAsset.h"
 #include "Weapon/BaseWeaponComponent.h"
 #include "BaseGameplayTags.h"
+#include "Cannon/EnemyCannonOperatorComponent.h"
 
 #include "Storage/StorageChest.h"
 
@@ -50,6 +51,7 @@ ABaseEnemy::ABaseEnemy()
 	WeaponComponent = CreateDefaultSubobject<UBaseWeaponComponent>(TEXT("WeaponComponent"));
 	WaypointMoveComponent = CreateDefaultSubobject<UEnemyWaypointMoveComponent>(TEXT("WaypointMoveComponent"));
 	HealthComponent = CreateDefaultSubobject<UBaseHealthComponent>(TEXT("HealthComponent"));
+	CannonOperatorComponent = CreateDefaultSubobject<UEnemyCannonOperatorComponent>(TEXT("CannonOperatorComponent"));
 
 	// ================= Health Bar =================
 	HealthBarWidgetComponent = CreateDefaultSubobject<UWidgetComponent>(TEXT("HealthBarWidgetComponent"));
@@ -121,6 +123,11 @@ void ABaseEnemy::BeginPlay()
 
 void ABaseEnemy::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	if (CannonOperatorComponent)
+	{
+		CannonOperatorComponent->DismountAndRelease();
+	}
+
 	if (HealthComponent)
 	{
 		HealthComponent->OnDeathStarted.RemoveDynamic(this, &ABaseEnemy::OnDeathStarted);
@@ -186,6 +193,11 @@ void ABaseEnemy::HandleDeath_Implementation()
 
 void ABaseEnemy::OnDeathStarted(UBaseHealthComponent* InHealthComponent)
 {
+	if (CannonOperatorComponent)
+	{
+		CannonOperatorComponent->DismountAndRelease();
+	}
+
 	if (HealthBarWidgetComponent)
 	{
 		HealthBarWidgetComponent->SetVisibility(false);

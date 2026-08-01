@@ -4,13 +4,37 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "GameplayTagContainer.h"
 #include "Cannonball.generated.h"
 
 class USphereComponent;
 class UStaticMeshComponent;
 class UProjectileMovementComponent;
 class AShip;
+class APawn;
 class UGameplayEffect;
+
+/** Immutable gameplay identity and launch values captured when a Cannon fires. */
+USTRUCT(BlueprintType)
+struct WATERANDSHIP_API FCannonFireContext
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadOnly, Category = "Cannonball")
+	TObjectPtr<AShip> MountShip = nullptr;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Cannonball")
+	TObjectPtr<APawn> Operator = nullptr;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Cannonball")
+	FGameplayTag SourceTeam;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Cannonball")
+	float Damage = 0.0f;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Cannonball")
+	float ProjectileSpeed = 0.0f;
+};
 
 UCLASS()
 class WATERANDSHIP_API ACannonball : public AActor
@@ -30,6 +54,7 @@ public:
 
 	/** Initialize Projectile values on spawn */
 	void InitializeProjectile(AShip* InLaunchingShip, float InDamage, float InSpeed);
+	void InitializeProjectile(const FCannonFireContext& InFireContext);
 
 	/** Optional exact endpoint used by skills so terrain impacts do not continue below the Landscape. */
 	void SetDesignatedImpactLocation(const FVector& InImpactLocation, float InArrivalTolerance = 75.0f);
@@ -69,7 +94,11 @@ protected:
 	void OnHit(UPrimitiveComponent* HitComponent, AActor* OtherActor, UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit);
 
 	virtual void HandleShipHit(AShip* HitShip);
+	virtual void HandleCharacterHit(APawn* HitPawn, const FHitResult& Hit);
 	AShip* GetLaunchingShip() const { return LaunchingShip; }
+	const FCannonFireContext& GetFireContext() const { return FireContext; }
+	bool IsFriendlyTarget(const AActor* TargetActor) const;
+	bool ApplyDamageToActor(AActor* TargetActor, const FHitResult* HitResult);
 	void TriggerWaterRipple(const FVector& HitLocation);
 	void DeactivateProjectile();
 
@@ -78,8 +107,12 @@ private:
 	UPROPERTY()
 	TObjectPtr<AShip> LaunchingShip = nullptr;
 
+	UPROPERTY()
+	FCannonFireContext FireContext;
+
 	bool bHasHitWater = false;
 	bool bHasProcessedShipHit = false;
+	bool bHasProcessedCharacterHit = false;
 	bool bHasDesignatedImpact = false;
 	FVector DesignatedImpactLocation = FVector::ZeroVector;
 	FVector PreviousProjectileLocation = FVector::ZeroVector;

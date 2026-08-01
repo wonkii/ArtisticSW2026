@@ -443,7 +443,7 @@ void AEnemyShip::FindAttachedCannons()
 	{
 		if (ACannon* Cannon = Cast<ACannon>(Actor))
 		{
-			AttachedCannons.Add(Cannon);
+			AttachedCannons.AddUnique(Cannon);
 		}
 	}
 
@@ -456,12 +456,11 @@ void AEnemyShip::FindAttachedCannons()
 		{
 			if (ACannon* Cannon = Cast<ACannon>(CAC->GetChildActor()))
 			{
-				AttachedCannons.Add(Cannon);
+				AttachedCannons.AddUnique(Cannon);
 			}
 		}
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("AEnemyShip::FindAttachedCannons - Found %d cannons attached to %s."), AttachedCannons.Num(), *GetName());
 }
 
 void AEnemyShip::UpdateActiveCannons()

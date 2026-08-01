@@ -14,6 +14,7 @@
 class UAbilitySystemComponent;
 class UBaseWeaponComponent;
 class UBaseHealthComponent;
+class UEnemyCannonOperatorComponent;
 class UEnemyWaypointMoveComponent;
 class UHealthBarWidget;
 class UWidgetComponent;
@@ -84,6 +85,9 @@ protected:
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	TObjectPtr<UBaseHealthComponent> HealthComponent;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	TObjectPtr<UEnemyCannonOperatorComponent> CannonOperatorComponent;
 
 	// ================= Health Bar =================
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
@@ -171,6 +175,9 @@ public:
 	FORCEINLINE virtual UAbilitySystemComponent* GetAbilitySystemComponent() const override { check(AbilitySystemComponent) return AbilitySystemComponent; }
 	FORCEINLINE UEnemyWaypointMoveComponent* GetWaypointMoveComponent() const {return WaypointMoveComponent;}
 	FORCEINLINE UBaseHealthComponent* GetHealthComponent() const { return HealthComponent; }
+
+	UFUNCTION(BlueprintPure, Category = "Enemy Cannon")
+	FORCEINLINE UEnemyCannonOperatorComponent* GetCannonOperatorComponent() const { return CannonOperatorComponent; }
 
 	// Enemy소환 API
 	UFUNCTION(BlueprintCallable, Category = "Wave")

@@ -51,7 +51,8 @@ public:
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
 	/* Boarding Interaction - Ship의 Board()와 완전히 동일한 패턴 */
-	void Board(APawn* PlayerPawn);
+	UFUNCTION(BlueprintCallable, Category = "Cannon")
+	virtual bool Board(APawn* PlayerPawn);
 
 	/** Force exit from cannon control (e.g. when ship is destroyed or forced off) */
 	void ForceExit();
@@ -68,6 +69,9 @@ public:
 	FOnWaterBombModeChanged OnWaterBombModeChanged;
 	APawn* GetRidingPlayer() const { return RidingPlayer; }
 
+	UFUNCTION(BlueprintPure, Category = "Cannon")
+	bool IsCannonDisabled() const;
+
 	bool ActivateWaterBombModeFromAbility(
 		UGameplayAbility* Ability,
 		TSubclassOf<AWaterBombCannonball> ProjectileClass,
@@ -78,7 +82,17 @@ public:
 	/** Allows AI to set aim rotation directly on the server. */
 	void SetAIAimRotation(float NewPitch, float NewYaw);
 
+	/** Cheap line-of-sight angle check used while ranking AI Cannon candidates. */
+	bool GetRequiredAimAtWorldLocation(const FVector& WorldLocation, float& OutPitch, float& OutYaw) const;
+	bool CanAimAtWorldLocation(const FVector& WorldLocation) const;
+
 protected:
+	/** Extension points for specialized cannons without adding their state to ACannon. */
+	virtual bool CanBoard(APawn* PlayerPawn) const;
+	virtual void OnPlayerBoarded(APawn* PlayerPawn);
+	virtual void OnPlayerExited(APawn* PlayerPawn);
+	virtual APawn* ResolveFiringOperator() const;
+
 	// ---- Components ----
 	/** Base mesh that rotates left/right (Yaw) */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")

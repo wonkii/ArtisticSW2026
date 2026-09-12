@@ -101,6 +101,7 @@ private:
 	TArray<FName> CachedComboSections;
 	float CachedAttackMontagePlayRate = 1.0f;
 	int32 CurrentComboIndex = INDEX_NONE;
+	int32 LastOpenedComboIndex = MIN_int32;
 	bool bComboInputBuffered = false;
 	bool bHitScanActive = false;
 	bool bAttackFinished = false;

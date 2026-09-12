@@ -226,7 +226,7 @@ bool FRangedEnemyDefaultsTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Player and Enemy projectile entry points share AArrowProjectile"),
 		APlayerArrowProjectile::StaticClass()->IsChildOf(AArrowProjectile::StaticClass())
 		&& ARangedEnemyProjectile::StaticClass()->IsChildOf(AArrowProjectile::StaticClass()));
-	TestFalse(TEXT("Faction-agnostic damage is the default gameplay policy"),
+	TestTrue(TEXT("Friendly-fire protection is the default gameplay policy"),
 		GetDefault<AArrowProjectile>()->IsTeamDamageFilteringEnabled());
 	TestTrue(TEXT("Ranged attack ability exposes the ranged attack asset tag"),
 		AbilityCDO->GetAssetTags().HasTagExact(GameplayAbility_RangedAttack));
@@ -665,7 +665,7 @@ bool FRangedEnemyProjectileTeamFilterTest::RunTest(const FString& Parameters)
 
 	Projectile->SetOwner(SourceEnemy);
 	Projectile->SetInstigator(SourceEnemy);
-	Projectile->InitializeDamage(SourceASC, SourceEnemy, 1.0f);
+
 
 	TestFalse(TEXT("Projectile always rejects its source actor"), Projectile->IsValidDamageTarget(SourceEnemy));
 	TestFalse(TEXT("Default team filter rejects another enemy-team actor"),
@@ -733,6 +733,7 @@ bool FRangedEnemyAttackIntegrationTest::RunTest(const FString& Parameters)
 	}
 
 	EnemyASC->InitAbilityActorInfo(Enemy, Enemy);
+	EnemyASC->AddAttributeSetSubobject(NewObject<UBaseAttributeSet>(Enemy));
 	EnemyASC->AddLooseGameplayTag(Team_Enemy);
 
 	UWeaponDataAsset* TestWeaponRegistry = NewObject<UWeaponDataAsset>(Enemy);
@@ -903,7 +904,8 @@ bool FStrengthProjectilePayloadTest::RunTest(const FString& Parameters)
 
 	FStrengthDamageRequest DamageRequest;
 	DamageRequest.SourceASC = SourceASC;
-	DamageRequest.DamageEffectClass = UGASDamageInstantGameplayEffect::StaticClass();
+
+
 	DamageRequest.AttackCoefficient = 1.0f;
 	DamageRequest.ChargeMultiplier = 1.0f;
 	DamageRequest.InstigatorActor = SourceEnemy;
@@ -911,7 +913,7 @@ bool FStrengthProjectilePayloadTest::RunTest(const FString& Parameters)
 	const FGameplayEffectSpecHandle DirectDamageSpec = UGASCombatLibrary::MakeStrengthDamageEffectSpec(DamageRequest);
 	Projectile->InitializeStrengthDamage(SourceASC, SourceEnemy, DirectDamageSpec);
 
-	TestEqual(TEXT("Projectile stores one direct-damage spec"), Projectile->DamageEffectSpecHandles.Num(), 1);
+	TestTrue(TEXT("Projectile stores one direct-damage spec"), Projectile->DirectDamageSpec.IsValid());
 	TestEqual(TEXT("Projectile builds every configured status spec"), Projectile->StatusEffectSpecHandles.Num(), 2);
 	for (const FGameplayEffectSpecHandle& StatusSpec : Projectile->StatusEffectSpecHandles)
 	{

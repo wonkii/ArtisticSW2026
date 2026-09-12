@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
@@ -125,14 +125,9 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Item|Strength")
 	bool SetStrengthBonus(float InStrengthBonus);
 
-	/** Server-only. Applies at most one infinite Strength effect for this item. */
-	bool ApplyStrengthBonusEffect(UAbilitySystemComponent* SourceASC, TSubclassOf<UGameplayEffect> StrengthEffectClass);
-
-	/** Server-only. Removes the exact active effect created by ApplyStrengthBonusEffect. */
-	bool RemoveStrengthBonusEffect();
-
+	/** Queries the owner model; this item never owns a GameplayEffect handle. */
 	UFUNCTION(BlueprintPure, Category = "Item|Strength")
-	bool HasActiveStrengthBonusEffect() const { return EquippedStrengthEffectHandle.IsValid(); }
+	bool HasActiveStrengthBonusEffect() const;
 
 	/* Hovering */
 protected:
@@ -162,8 +157,4 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Item|Strength", meta = (ClampMin = "0.0"))
 	float StrengthBonus = 0.0f;
 
-	FActiveGameplayEffectHandle EquippedStrengthEffectHandle;
-
-	UPROPERTY(Transient)
-	TObjectPtr<UAbilitySystemComponent> StrengthEffectASC;
 };

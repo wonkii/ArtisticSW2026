@@ -1,4 +1,4 @@
-﻿using UnrealBuildTool;
+using UnrealBuildTool;
 
 public class GASCore: ModuleRules
 {
@@ -7,13 +7,13 @@ public class GASCore: ModuleRules
         PrivateDependencyModuleNames.AddRange(new string[] {
             // GASCore의 .cpp 파일에서만 필요한 모듈 의존성입니다.
             "Core",
-            "CoreUObject",
-            "ArtisticSWCore"
+            "CoreUObject"
         });
 
         PublicDependencyModuleNames.AddRange(new string[] {
             // GASCore의 public 헤더가 노출하는 GAS 관련 모듈입니다.
             "Engine",
+            "ArtisticSWCore",
             "GameplayAbilities",
             "GameplayTasks",
             "GameplayTags"

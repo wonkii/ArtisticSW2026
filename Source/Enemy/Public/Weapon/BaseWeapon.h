@@ -1,4 +1,4 @@
-﻿// Fill out your copyright notice in the Description page of Project Settings.
+// Fill out your copyright notice in the Description page of Project Settings.
 
 #pragma once
 
@@ -66,10 +66,11 @@ protected:
 	// HitScan TimerHandle
 	FTimerHandle HitScanTimerHandle;
 	
-	// HitScan이 활성화된 동안, 이미 Hit 처리한 Actor들을 저장하는 Set. HitScan이 끝날 때 초기화
-	TSet<TWeakObjectPtr<AActor>> HitActors;
 
 protected:
+	FVector PreviousTraceStart = FVector::ZeroVector;
+	FVector PreviousTraceEnd = FVector::ZeroVector;
+	bool bHasPreviousTrace = false;
 	void ProcessTrace();
 	void HitScan(const FHitResult& HitResult);
 	void ApplyEffectToTarget(AActor* TargetActor, const FHitResult& HitResult) const;

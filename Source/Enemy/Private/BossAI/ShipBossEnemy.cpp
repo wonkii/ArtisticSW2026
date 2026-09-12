@@ -1,6 +1,8 @@
 #include "BossAI/ShipBossEnemy.h"
 
 #include "AbilitySystemComponent.h"
+#include "Animation/AnimInstance.h"
+#include "BrainComponent.h"
 #include "AI/BaseAIController.h"
 #include "BaseGameplayTags.h"
 #include "BossAI/ShipBossAIController.h"
@@ -17,6 +19,7 @@
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Net/UnrealNetwork.h"
 #include "ShipAI/EnemyShip.h"
+#include "Weapon/BaseWeaponComponent.h"
 
 AShipBossEnemy::AShipBossEnemy()
 {
@@ -336,6 +339,11 @@ bool AShipBossEnemy::TransitionBossAIState(FGameplayTag ExpectedState, FGameplay
 
 void AShipBossEnemy::SetBossHidden(bool bInHidden)
 {
+	// Late Vanish callbacks cannot hide a dead boss after the montage starts.
+	if (bDeathHandled)
+	{
+		bInHidden = false;
+	}
 	if (!HasAuthority() || bBossHidden == bInHidden)
 	{
 		return;
@@ -372,7 +380,7 @@ bool AShipBossEnemy::BeginHiddenRelocation()
 
 bool AShipBossEnemy::RelocateWhileHidden(const FTransform& DestinationTransform)
 {
-	if (!HasAuthority() || !bHiddenRelocationActive || !bBossHidden || !IsValid(HostShip))
+	if (!HasAuthority() || bDeathHandled || !bHiddenRelocationActive || !bBossHidden || !IsValid(HostShip))
 	{
 		return false;
 	}
@@ -405,7 +413,11 @@ void AShipBossEnemy::FinishHiddenRelocation()
 		return;
 	}
 
-	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
+	if (bDeathHandled)
+	{
+		ApplyDeathMovementState();
+	}
+	else if (UCharacterMovementComponent* Movement = GetCharacterMovement())
 	{
 		Movement->StopMovementImmediately();
 		Movement->SetMovementMode(MOVE_Walking);
@@ -422,8 +434,20 @@ void AShipBossEnemy::FinishHiddenRelocation()
 
 void AShipBossEnemy::HandleDeath_Implementation()
 {
+	// Capture before ability/BT cleanup. A dash may be between authored points;
+	// neither its destination nor its last occupied point is the death location.
+	const FTransform DeathWorldTransform = GetActorTransform();
 	if (HasAuthority())
 	{
+		if (AAIController* BossController = Cast<AAIController>(GetController()))
+		{
+			BossController->StopMovement();
+			BossController->ClearFocus(EAIFocusPriority::Gameplay);
+			if (UBrainComponent* Brain = BossController->GetBrainComponent())
+			{
+				Brain->StopLogic(TEXT("Boss died"));
+			}
+		}
 		if (HostShip)
 		{
 			HostShip->ReleaseAllDeckPointsFor(this);
@@ -434,6 +458,10 @@ void AShipBossEnemy::HandleDeath_Implementation()
 		{
 			ASC->CancelAllAbilities();
 		}
+		if (WeaponComponent)
+		{
+			WeaponComponent->DestroyCurrentWeapon();
+		}
 		if (bHiddenRelocationActive)
 		{
 			FinishHiddenRelocation();
@@ -443,8 +471,79 @@ void AShipBossEnemy::HandleDeath_Implementation()
 			SetBossHidden(false);
 		}
 		TransitionBossAIState(FGameplayTag(), AI_State_Boss_Dead);
+		BossCombatTarget = nullptr;
+		AnchorDeathToDeck(DeathWorldTransform);
 	}
+	ApplyDeathMovementState();
+	ApplyHiddenPresentation();
 	Super::HandleDeath_Implementation();
+}
+
+void AShipBossEnemy::ApplyDeathMovementState()
+{
+	bUseControllerRotationYaw = false;
+	bUseControllerRotationPitch = false;
+	bUseControllerRotationRoll = false;
+	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
+	{
+		Movement->StopMovementImmediately();
+		Movement->DisableMovement();
+		Movement->SetBase(nullptr);
+		// Attachment owns the entire transform now. Do not let simulated-proxy
+		// smoothing, based movement or root motion move the corpse independently.
+		Movement->NetworkSmoothingMode = ENetworkSmoothingMode::Disabled;
+		Movement->SetComponentTickEnabled(false);
+	}
+	if (UCapsuleComponent* Capsule = GetCapsuleComponent())
+	{
+		Capsule->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	}
+	if (DashDamageVolume)
+	{
+		DashDamageVolume->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	}
+	if (USkeletalMeshComponent* CharacterMesh = GetMesh())
+	{
+		CharacterMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		// Clear any outstanding client smoothing offset, then let the AnimBP
+		// continue evaluating the death montage (including offscreen/server).
+		CharacterMesh->SetRelativeLocationAndRotation(GetBaseTranslationOffset(), GetBaseRotationOffset());
+		CharacterMesh->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones;
+		if (UAnimInstance* AnimInstance = CharacterMesh->GetAnimInstance())
+		{
+			AnimInstance->SetRootMotionMode(ERootMotionMode::IgnoreRootMotion);
+		}
+	}
+}
+
+void AShipBossEnemy::AnchorDeathToDeck(const FTransform& DeathWorldTransform)
+{
+	ApplyDeathMovementState();
+	UStaticMeshComponent* DeckMesh = IsValid(HostShip) ? HostShip->GetShipDeckMesh() : nullptr;
+	if (IsValid(DeckMesh))
+	{
+		const FTransform DeathLocalTransform = DeathWorldTransform.GetRelativeTransform(DeckMesh->GetComponentTransform());
+		if (AttachToComponent(DeckMesh, FAttachmentTransformRules::KeepWorldTransform))
+		{
+			GetRootComponent()->SetRelativeTransform(DeathLocalTransform);
+		}
+	}
+	// Native AttachmentReplication sends the parent AND relative transform.
+	// Clients must never capture a second anchor from their delayed world pose.
+	ForceNetUpdate();
+}
+
+void AShipBossEnemy::HandleDeathFinishedPresentation()
+{
+	// The authored montage disables auto blend-out and holds its final pose.
+	// Keep it evaluating locally: DeathFinished can arrive before a client's
+	// montage reaches the end. BaseEnemy still owns the existing corpse lifespan.
+	ApplyDeathMovementState();
+}
+
+void AShipBossEnemy::ApplyLocalDeathRagdoll()
+{
+	// Preserve the boss-only animation policy for legacy Blueprint callers too.
 }
 
 void AShipBossEnemy::ReleaseSummonedDeckEnemies()
@@ -465,6 +564,11 @@ void AShipBossEnemy::ReleaseSummonedDeckEnemies()
 void AShipBossEnemy::OnRep_HostShip()
 {
 	BindHostShip();
+	if (bDeathHandled || (GetHealthComponent() && GetHealthComponent()->IsDead()))
+	{
+		ApplyDeathMovementState();
+		return;
+	}
 	if (UCharacterMovementComponent* Movement = GetCharacterMovement();
 		Movement && HostShip && HostShip->GetShipDeckMesh())
 	{
@@ -504,8 +608,11 @@ void AShipBossEnemy::UnbindHostShip()
 
 void AShipBossEnemy::ApplyHiddenPresentation()
 {
+	// Death replication can arrive before the final Vanish visibility update.
+	const bool bIsDead = bDeathHandled || (GetHealthComponent() && GetHealthComponent()->IsDead());
+	const bool bShouldHide = bBossHidden && !bIsDead;
 	UCapsuleComponent* Capsule = GetCapsuleComponent();
-	if (bBossHidden)
+	if (bShouldHide)
 	{
 		// Hide first so neither collision removal nor later movement correction is visible.
 		SetActorHiddenInGame(true);
@@ -518,7 +625,8 @@ void AShipBossEnemy::ApplyHiddenPresentation()
 	{
 		// Restore collision before visibility. The server has already restored the
 		// movement base and Walking mode during FinishHiddenRelocation.
-		Capsule->SetCollisionEnabled(InitialCapsuleCollision);
+		Capsule->SetCollisionEnabled(bIsDead
+			? ECollisionEnabled::NoCollision : InitialCapsuleCollision);
 	}
 
 	TArray<AActor*> AttachedActors;
@@ -527,11 +635,11 @@ void AShipBossEnemy::ApplyHiddenPresentation()
 	{
 		if (AttachedActor)
 		{
-			AttachedActor->SetActorHiddenInGame(bBossHidden);
+			AttachedActor->SetActorHiddenInGame(bShouldHide);
 		}
 	}
 
-	if (!bBossHidden)
+	if (!bShouldHide)
 	{
 		SetActorHiddenInGame(false);
 	}

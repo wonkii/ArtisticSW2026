@@ -139,6 +139,7 @@ protected:
 	FVector PendingReleaseAimTarget = FVector::ZeroVector;
 	bool bHasPendingReleaseAimTarget = false;
 	float DrawStartTime = 0.0f;
+	float ServerReleaseDrawAlpha = 0.0f;
 	bool bIsDrawing = false;
 	bool bIsFullyDrawn = false;
 	bool bIsReleaseInProgress = false;

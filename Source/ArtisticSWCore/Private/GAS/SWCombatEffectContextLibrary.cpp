@@ -173,7 +173,10 @@ bool USWCombatEffectContextLibrary::EnrichCombatEffectSpec(
 	const FHitResult* HitResult,
 	const FVector& ExplicitImpactDirection)
 {
-	FGameplayEffectContextHandle ContextHandle = EffectSpec.GetContext().Duplicate();
+	// Duplicate only the context. SetContext would recapture source attributes and
+	// replace the attack/launch-time Strength snapshot with the current value.
+	EffectSpec.DuplicateEffectContext();
+	FGameplayEffectContextHandle ContextHandle = EffectSpec.GetContext();
 	if (!ContextHandle.IsValid())
 	{
 		return false;
@@ -186,6 +189,5 @@ bool USWCombatEffectContextLibrary::EnrichCombatEffectSpec(
 		TargetActor,
 		HitResult,
 		ExplicitImpactDirection);
-	EffectSpec.SetContext(ContextHandle);
 	return bHasDirection;
 }

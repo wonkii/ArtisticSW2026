@@ -2,6 +2,7 @@
 
 #include "AbilitySystemBlueprintLibrary.h"
 #include "AbilitySystemComponent.h"
+#include "GAS/CombatHitResolver.h"
 #include "BaseGameplayTags.h"
 #include "Components/BoxComponent.h"
 #include "Components/PrimitiveComponent.h"
@@ -109,6 +110,7 @@ void AArrowProjectile::BeginPlay()
 
 void AArrowProjectile::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	if (auto* Resolver = FindComponentByClass<UCombatHitResolver>()) Resolver->CloseWindow();
 	if (CollisionComp)
 	{
 		for (const TWeakObjectPtr<AActor>& IgnoredActorPtr : MovementIgnoredActors)
@@ -127,12 +129,19 @@ void AArrowProjectile::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 void AArrowProjectile::LaunchArrow(const FVector& LaunchVelocity)
 {
-	if (ProjectileMovementComp)
-	{
-		ProjectileMovementComp->ProjectileGravityScale = FlightGravityScale;
-		ProjectileMovementComp->Velocity = LaunchVelocity;
-		ProjectileMovementComp->Activate();
-	}
+	if (!HasAuthority() || !DirectDamageSpec.IsValid() || LaunchVelocity.ContainsNaN()
+		|| LaunchVelocity.IsNearlyZero() || !ProjectileMovementComp || !CollisionComp) return;
+	bImpactHandled = false;
+	ApplyArrowCollisionProfile();
+	CollisionComp->SetSimulatePhysics(false);
+	ProjectileMovementComp->SetUpdatedComponent(CollisionComp);
+	ProjectileMovementComp->ProjectileGravityScale = FlightGravityScale;
+	ProjectileMovementComp->bSimulationEnabled = true;
+	ProjectileMovementComp->MaxSpeed = FMath::Max(ProjectileMovementComp->MaxSpeed, LaunchVelocity.Size());
+	ProjectileMovementComp->Velocity = LaunchVelocity;
+	ProjectileMovementComp->Activate(true);
+	ProjectileMovementComp->SetComponentTickEnabled(true);
+	ForceNetUpdate();
 }
 
 void AArrowProjectile::IgnoreActorForMovement(AActor* ActorToIgnore)
@@ -177,84 +186,39 @@ FTransform AArrowProjectile::GetArrowVisualRelativeTransform() const
 	return MeshComp ? MeshComp->GetRelativeTransform() : FTransform::Identity;
 }
 
-void AArrowProjectile::InitializeDamage(UAbilitySystemComponent* InSourceASC, AActor* InInstigatorActor, float InChargeDamageMultiplier)
-{
-	if (!HasAuthority())
-	{
-		return;
-	}
-
-	SourceASC = InSourceASC;
-	InstigatorActor = InInstigatorActor;
-	DamageEffectSpecHandles.Reset();
-	StatusEffectSpecHandles.Reset();
-	AppliedActors.Reset();
-	BuildStatusEffectSpecs();
-}
-
-void AArrowProjectile::InitializeStrengthDamage(
+bool AArrowProjectile::InitializeStrengthDamage(
 	UAbilitySystemComponent* InSourceASC,
 	AActor* InInstigatorActor,
 	const FGameplayEffectSpecHandle& InDirectDamageSpec)
 {
 	if (!HasAuthority())
 	{
-		return;
+		return false;
 	}
 
 	SourceASC = InSourceASC;
 	InstigatorActor = InInstigatorActor;
-	DamageEffectSpecHandles.Reset();
+	DirectDamageSpec = FGameplayEffectSpecHandle();
 	StatusEffectSpecHandles.Reset();
 	StatusEffectRefreshGrantedTags.Reset();
-	AppliedActors.Reset();
 
 	if (!SourceASC)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("AArrowProjectile::InitializeStrengthDamage: SourceASC is missing."));
-		return;
+		return false;
 	}
 
 	if (!InDirectDamageSpec.IsValid() || !InDirectDamageSpec.Data.IsValid())
 	{
 		UE_LOG(LogTemp, Warning, TEXT("AArrowProjectile::InitializeStrengthDamage: invalid Damage Spec."));
-		return;
+		return false;
 	}
 
-	DamageEffectSpecHandles.Add(InDirectDamageSpec);
+	auto* Resolver = FindComponentByClass<UCombatHitResolver>();
+	if (!Resolver || !Resolver->OpenWindow(InDirectDamageSpec)) return false;
+	DirectDamageSpec = InDirectDamageSpec;
 	BuildStatusEffectSpecs();
-}
-
-TSubclassOf<UGameplayEffect> AArrowProjectile::GetDirectDamageEffectClass() const
-{
-	if (DamageData.DirectDamageEffectClass)
-	{
-		return DamageData.DirectDamageEffectClass;
-	}
-
-	for (const FArrowDamageEffect& LegacyDamageEffect : DamageData.DamageEffects)
-	{
-		if (LegacyDamageEffect.DamageEffectClass)
-		{
-			return LegacyDamageEffect.DamageEffectClass;
-		}
-	}
-
-	return nullptr;
-}
-
-void AArrowProjectile::SetDamageEffectSpecHandle(const FGameplayEffectSpecHandle& InDamageEffectSpecHandle)
-{
-	DamageEffectSpecHandles.Reset();
-	if (InDamageEffectSpecHandle.IsValid())
-	{
-		DamageEffectSpecHandles.Add(InDamageEffectSpecHandle);
-	}
-}
-
-void AArrowProjectile::SetAdditionalDamageEffectSpecHandles(const TArray<FGameplayEffectSpecHandle>& InAdditionalDamageEffectSpecHandles)
-{
-	DamageEffectSpecHandles.Append(InAdditionalDamageEffectSpecHandles);
+	return true;
 }
 
 void AArrowProjectile::Multicast_PlayImpactFX_Implementation(const FHitResult& Hit)
@@ -474,34 +438,13 @@ void AArrowProjectile::BuildStatusEffectSpecs()
 			}
 		}
 
-		for (const TSubclassOf<UGameplayEffect>& StatusEffectClass : DamageData.StatusEffectClasses)
-		{
-			if (!StatusEffectClass)
-			{
-				continue;
-			}
 
-			FGameplayEffectContextHandle ContextHandle =
-				USWCombatEffectContextLibrary::MakeCombatEffectContext(
-					SourceASC, InstigatorActor.Get(), this);
-
-			FGameplayEffectSpecHandle StatusSpecHandle = SourceASC->MakeOutgoingSpec(
-				StatusEffectClass,
-				1.0f,
-				ContextHandle);
-
-			if (StatusSpecHandle.IsValid())
-			{
-				StatusEffectSpecHandles.Add(StatusSpecHandle);
-				StatusEffectRefreshGrantedTags.Add(FGameplayTag());
-			}
-		}
 	}
 }
 
 void AArrowProjectile::ApplyDamageToActor(AActor* TargetActor, const FHitResult& HitResult)
 {
-	if (!TargetActor)
+	if (!HasAuthority() || !TargetActor)
 	{
 		return;
 	}
@@ -513,39 +456,11 @@ void AArrowProjectile::ApplyDamageToActor(AActor* TargetActor, const FHitResult&
 		return;
 	}
 
-	const bool bHasValidDirectDamageSpec = DamageEffectSpecHandles.ContainsByPredicate(
-		[](const FGameplayEffectSpecHandle& SpecHandle)
-		{
-			return SpecHandle.IsValid() && SpecHandle.Data.IsValid();
-		});
-	if (!bHasValidDirectDamageSpec)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("AArrowProjectile::ApplyDamageToActor: invalid Damage Spec."));
-		return;
-	}
+	if (!DirectDamageSpec.IsValid()) return;
 
-	const TWeakObjectPtr<AActor> TargetActorPtr(TargetActor);
-	if (AppliedActors.Contains(TargetActorPtr))
-	{
-		return;
-	}
-	AppliedActors.Add(TargetActorPtr);
-
-	for (const FGameplayEffectSpecHandle& DamageSpecHandle : DamageEffectSpecHandles)
-	{
-		if (DamageSpecHandle.IsValid() && DamageSpecHandle.Data.IsValid())
-		{
-			FGameplayEffectSpec TargetDamageSpec(*DamageSpecHandle.Data.Get());
-			USWCombatEffectContextLibrary::EnrichCombatEffectSpec(
-				TargetDamageSpec,
-				InstigatorActor.Get(),
-				this,
-				TargetActor,
-				&HitResult,
-				GetVelocity());
-			TargetASC->ApplyGameplayEffectSpecToSelf(TargetDamageSpec);
-		}
-	}
+	if (!HasAuthority()) return;
+	auto* Resolver = FindComponentByClass<UCombatHitResolver>();
+	if (!Resolver || !Resolver->ResolveHit(TargetASC, HitResult, bEnableTeamDamageFiltering)) return;
 
 	for (int32 StatusEffectIndex = 0; StatusEffectIndex < StatusEffectSpecHandles.Num(); ++StatusEffectIndex)
 	{

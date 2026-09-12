@@ -256,6 +256,7 @@ UE_DEFINE_GAMEPLAY_TAG(Item_Category_Skill, "Item.Category.Skill");
 
 // Enemy
 UE_DEFINE_GAMEPLAY_TAG(Item_EnemyWeapon_Sword, "Item.EnemyWeapon.Sword");
+UE_DEFINE_GAMEPLAY_TAG(Item_EnemyWeapon_Knife, "Item.EnemyWeapon.Knife");
 UE_DEFINE_GAMEPLAY_TAG(Item_EnemyWeapon_Hand, "Item.EnemyWeapon.Hand");
 UE_DEFINE_GAMEPLAY_TAG(Item_EnemyWeapon_Bow, "Item.EnemyWeapon.Bow");
 

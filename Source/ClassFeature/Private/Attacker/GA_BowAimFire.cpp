@@ -14,7 +14,6 @@
 #include "Item/Projectiles/ArrowProjectile.h"
 #include "Item/Weapons/BowItem.h"
 #include "GASCombatLibrary.h"
-#include "GASAttributeDamageGameplayEffect.h"
 
 UGA_BowAimFire::UGA_BowAimFire()
 {
@@ -362,6 +361,12 @@ void UGA_BowAimFire::BeginRelease(const FGameplayEventData& ReleaseInputPayload)
 		FinishShot();
 		return;
 	}
+	if (GetAvatarActorFromActorInfo() && GetAvatarActorFromActorInfo()->HasAuthority())
+	{
+		const float HeldTime = GetWorld()->GetTimeSeconds() - DrawStartTime;
+		ServerReleaseDrawAlpha = FMath::Clamp((HeldTime - DrawAlphaStartDelay)
+			/ FMath::Max(FullDrawTime - DrawAlphaStartDelay, KINDA_SMALL_NUMBER), 0.f, 1.f);
+	}
 	PendingReleaseAimTarget = CapturedAimTarget;
 	bHasPendingReleaseAimTarget = true;
 
@@ -396,12 +401,11 @@ void UGA_BowAimFire::BeginRelease(const FGameplayEventData& ReleaseInputPayload)
 			ReleaseMontage,
 			ReleaseMontagePlayRate,
 			NAME_None,
-			true);
+			true, 1.f, 0.f, true);
 
 		if (ReleaseMontageTask)
 		{
 			ReleaseMontageTask->OnCompleted.AddDynamic(this, &UGA_BowAimFire::OnReleaseMontageCompleted);
-			ReleaseMontageTask->OnBlendOut.AddDynamic(this, &UGA_BowAimFire::OnReleaseMontageCompleted);
 			ReleaseMontageTask->OnInterrupted.AddDynamic(this, &UGA_BowAimFire::OnReleaseMontageInterrupted);
 			ReleaseMontageTask->OnCancelled.AddDynamic(this, &UGA_BowAimFire::OnReleaseMontageInterrupted);
 			ReleaseMontageTask->ReadyForActivation();
@@ -565,37 +569,34 @@ void UGA_BowAimFire::FireArrowFromPendingRelease()
 		return;
 	}
 
+	Arrow->FinishSpawning(SpawnTransform);
 	Arrow->IgnoreActorForMovement(Player);
 	Arrow->IgnoreActorForMovement(CachedBow);
 
 	if (UAbilitySystemComponent* ASC = GetAbilitySystemComponentFromActorInfo())
 	{
-		const float DrawAlpha = CachedBowComponent->GetDrawAlpha();
+		const float DrawAlpha = ServerReleaseDrawAlpha;
+		if (!FMath::IsFinite(MinChargeDamageMultiplier) || !FMath::IsFinite(MaxChargeDamageMultiplier)
+			|| MinChargeDamageMultiplier <= 0.f || MaxChargeDamageMultiplier < MinChargeDamageMultiplier) { Arrow->Destroy(); return; }
 		const float ChargeDamageMultiplier = FMath::Lerp(MinChargeDamageMultiplier, MaxChargeDamageMultiplier, DrawAlpha);
-
-		TSubclassOf<UGameplayEffect> DamageEffectClass = Arrow->GetDirectDamageEffectClass();
-		if (!DamageEffectClass)
-		{
-			DamageEffectClass = UGASAttributeDamageGameplayEffect::StaticClass();
-		}
 
 		FStrengthDamageRequest DamageRequest;
 		DamageRequest.SourceASC = ASC;
-		DamageRequest.DamageEffectClass = DamageEffectClass;
+
 		DamageRequest.AttackCoefficient = Arrow->GetAttackCoefficient();
 		DamageRequest.ChargeMultiplier = ChargeDamageMultiplier;
 		DamageRequest.InstigatorActor = Player;
 		DamageRequest.EffectCauser = Arrow;
 		DamageRequest.EffectLevel = Arrow->GetDirectDamageEffectLevel();
-		Arrow->InitializeStrengthDamage(
-			ASC,
-			Player,
-			UGASCombatLibrary::MakeStrengthDamageEffectSpec(DamageRequest));
+		const FGameplayEffectSpecHandle DamageSpec = UGASCombatLibrary::MakeStrengthDamageEffectSpec(DamageRequest);
+		if (!DamageSpec.IsValid()) { Arrow->Destroy(); return; }
+		if (!Arrow->InitializeStrengthDamage(ASC, Player, DamageSpec)) { Arrow->Destroy(); return; }
 	}
+
+	else { Arrow->Destroy(); return; }
 
 	Arrow->SetOwner(Player);
 	Arrow->SetInstigator(Player);
-	Arrow->FinishSpawning(SpawnTransform);
 	Arrow->LaunchArrow(LaunchVelocity);
 	CachedBow->Multicast_PlayReleaseFX();
 	bHasFiredCurrentShot = true;

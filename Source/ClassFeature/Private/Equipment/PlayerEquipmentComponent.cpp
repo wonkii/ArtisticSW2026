@@ -18,6 +18,7 @@
 #include "Components/StaticMeshComponent.h"
 #include "Net/UnrealNetwork.h"
 #include "GASStrengthEquipmentGameplayEffect.h"
+#include "Components/EquipmentStatComponent.h"
 
 UPlayerEquipmentComponent::UPlayerEquipmentComponent()
 {
@@ -61,7 +62,7 @@ void UPlayerEquipmentComponent::EquipItemFromSlot(FGameplayTag KeyTag)
 		return;
 	}
 
-	if (IsEquipmentTransitioning())
+	if (IsEquipmentTransitioning() || !CanChangeEquipment())
 	{
 		return;
 	}
@@ -83,7 +84,7 @@ bool UPlayerEquipmentComponent::EquipInventoryWeapon(FGameplayTag ItemTag)
 
 	UInventoryComponent* Inventory = PlayerOwner ? PlayerOwner->GetInventoryComponent() : nullptr;
 	if (!PlayerOwner || !PlayerOwner->HasAuthority() || !Inventory ||
-		Inventory->GetMaterialCount(ItemTag) <= 0 || IsEquipmentTransitioning())
+		Inventory->GetMaterialCount(ItemTag) <= 0 || IsEquipmentTransitioning() || !CanChangeEquipment())
 	{
 		return false;
 	}
@@ -94,8 +95,6 @@ bool UPlayerEquipmentComponent::EquipInventoryWeapon(FGameplayTag ItemTag)
 	{
 		return true;
 	}
-
-	StoreCurrentEquippedItem();
 
 	UItemSubsystem* ItemSubsystem = GetWorld() ? GetWorld()->GetSubsystem<UItemSubsystem>() : nullptr;
 	if (!ItemSubsystem)
@@ -125,12 +124,12 @@ void UPlayerEquipmentComponent::UnequipCurrentItem()
 		PlayerOwner = Cast<ABasePlayer>(GetOwner());
 	}
 
-	if (!PlayerOwner || !PlayerOwner->HasAuthority() || IsEquipmentTransitioning())
+	if (!PlayerOwner || !PlayerOwner->HasAuthority() || IsEquipmentTransitioning() || !CanChangeEquipment())
 	{
 		return;
 	}
 
-	StoreCurrentEquippedItem();
+	if (!StoreCurrentEquippedItem()) return;
 	EquipmentState = EEquipmentState::None;
 	PlayerOwner->OnItemSlotsChanged.Broadcast();
 	PlayerOwner->OnQuickSlotsChanged.Broadcast();
@@ -148,6 +147,10 @@ void UPlayerEquipmentComponent::UseEquippedItem(bool bDestroy)
 		return;
 	}
 
+	if (auto* Stats = UEquipmentStatComponent::GetOrCreate(PlayerOwner))
+	{
+		if (!Stats->Clear()) return;
+	}
 	int32 EquippedIndex = PlayerOwner->ItemSlots.IndexOfByKey(PlayerOwner->EquippedItem.Get());
 	if (EquippedIndex != INDEX_NONE)
 	{
@@ -347,6 +350,9 @@ void UPlayerEquipmentComponent::OnRep_EquipmentState()
 
 void UPlayerEquipmentComponent::Server_EquipItemFromSlot_Implementation(FGameplayTag KeyTag)
 {
+	const double Now = GetWorld()->GetTimeSeconds();
+	if (Now - LastEquipmentRequestTime < 0.15) return;
+	LastEquipmentRequestTime = Now;
 	EquipItemFromSlot(KeyTag);
 }
 
@@ -749,19 +755,23 @@ bool UPlayerEquipmentComponent::IsItemOwnedByItemSlot(const ABaseItem* Item) con
 	});
 }
 
-void UPlayerEquipmentComponent::StoreCurrentEquippedItem()
+bool UPlayerEquipmentComponent::StoreCurrentEquippedItem(bool bRemoveStats)
 {
 	CancelActiveWeaponAbilities();
 
 	if (!PlayerOwner || !IsValid(PlayerOwner->EquippedItem))
 	{
-		return;
+		return true;
 	}
 
 	ABaseItem* PreviousItem = PlayerOwner->EquippedItem;
 	const bool bOwnedByItemSlot = IsItemOwnedByItemSlot(PreviousItem);
 	ClearBowArrowAnchor(Cast<ABowItem>(PreviousItem));
-	PreviousItem->RemoveStrengthBonusEffect();
+	if (bRemoveStats)
+	{
+		auto* Stats = UEquipmentStatComponent::GetOrCreate(PlayerOwner);
+		if (!Stats || !Stats->Clear()) return false;
+	}
 	RemoveEquippedItemAbility(PreviousItem);
 	PlayerOwner->EquippedItem = nullptr;
 
@@ -777,6 +787,7 @@ void UPlayerEquipmentComponent::StoreCurrentEquippedItem()
 	}
 
 	PlayerOwner->SetCombatMode(false);
+	return true;
 }
 
 void UPlayerEquipmentComponent::StartEquipItemFromSlot(int32 SlotIndex)
@@ -790,16 +801,14 @@ void UPlayerEquipmentComponent::StartEquipItemFromSlot(int32 SlotIndex)
 
 	if (PlayerOwner->EquippedItem == SlotItem)
 	{
-		StoreCurrentEquippedItem();
+		if (!StoreCurrentEquippedItem()) return;
 		EquipmentState = EEquipmentState::None;
 		return;
 	}
 
-	StoreCurrentEquippedItem();
-
 	if (!IsValid(SlotItem))
 	{
-		EquipmentState = EEquipmentState::None;
+		EquipmentState = IsValid(PlayerOwner->EquippedItem) ? EEquipmentState::Equipped : EEquipmentState::None;
 		return;
 	}
 
@@ -808,7 +817,7 @@ void UPlayerEquipmentComponent::StartEquipItemFromSlot(int32 SlotIndex)
 
 void UPlayerEquipmentComponent::StartEquipItem(ABaseItem* Item, FGameplayTag SourceSlotTag)
 {
-	if (!PlayerOwner || !PlayerOwner->HasAuthority() || !IsValid(Item))
+	if (!PlayerOwner || !PlayerOwner->HasAuthority() || !IsValid(Item) || !CanChangeEquipment())
 	{
 		return;
 	}
@@ -840,6 +849,7 @@ void UPlayerEquipmentComponent::FinalizePendingEquip()
 		return;
 	}
 
+	if (!CanChangeEquipment()) { CancelPendingEquip(); return; }
 	ABaseItem* ItemToEquip = PendingEquipItem.Get();
 	if (!IsValid(ItemToEquip))
 	{
@@ -859,11 +869,15 @@ void UPlayerEquipmentComponent::FinalizePendingEquip()
 			return;
 		}
 
-		PlayerOwner->EquippedItem = ItemToEquip;
-		if (!ItemToEquip->ApplyStrengthBonusEffect(PlayerOwner->GetAbilitySystemComponent(), StrengthEquipmentEffectClass))
+		auto* Stats = UEquipmentStatComponent::GetOrCreate(PlayerOwner);
+		if (!Stats || !Stats->Equip(PlayerOwner->GetAbilitySystemComponent(), ItemToEquip,
+			ItemToEquip->GetStrengthBonus(), StrengthEquipmentEffectClass))
 		{
-			UE_LOG(LogTemp, Warning, TEXT("UPlayerEquipmentComponent::FinalizePendingEquip: failed to apply Strength GE for %s."), *GetNameSafe(ItemToEquip));
+			CancelPendingEquip();
+			return;
 		}
+		StoreCurrentEquippedItem(false);
+		PlayerOwner->EquippedItem = ItemToEquip;
 		GrantEquippedItemAbility(ItemToEquip);
 		PlayerOwner->EnterCombatModeFromEquipment();
 	}
@@ -977,4 +991,13 @@ void UPlayerEquipmentComponent::Multicast_PlayEquipmentMontage_Implementation(AB
 {
 	EquipmentState = EEquipmentState::Equipping;
 	PlayEquipmentMontage(Item, Montage, PlayRate);
+}
+
+
+bool UPlayerEquipmentComponent::CanChangeEquipment() const
+{
+	const UAbilitySystemComponent* ASC = PlayerOwner ? PlayerOwner->GetAbilitySystemComponent() : nullptr;
+	return ASC && !ASC->HasMatchingGameplayTag(State_Dead) && !ASC->HasMatchingGameplayTag(State_Attacking)
+		&& !ASC->HasMatchingGameplayTag(State_Bow_Drawing) && !ASC->HasMatchingGameplayTag(State_Bow_FullyDrawn)
+		&& !ASC->HasMatchingGameplayTag(State_Bow_Releasing);
 }

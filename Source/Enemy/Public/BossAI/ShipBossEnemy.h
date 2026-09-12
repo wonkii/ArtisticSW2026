@@ -21,6 +21,8 @@ public:
 	AShipBossEnemy();
 
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
+	/** Boss corpses remain animated; even legacy Blueprint ragdoll calls must not enable physics. */
+	virtual void ApplyLocalDeathRagdoll() override;
 
 	/** InitialTarget may be null when a game mode possesses the sensed Player Ship directly. */
 	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category = "Boss|Encounter")
@@ -99,6 +101,7 @@ protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void HandleDeath_Implementation() override;
+	virtual void HandleDeathFinishedPresentation() override;
 	virtual bool ShouldWaitForDeathAbility() const override { return true; }
 
 	UFUNCTION()
@@ -115,6 +118,8 @@ protected:
 	void ApplyHiddenPresentation();
 	bool IsExclusiveBossAIState(FGameplayTag StateTag) const;
 	void ReleaseSummonedDeckEnemies();
+	void ApplyDeathMovementState();
+	void AnchorDeathToDeck(const FTransform& DeathWorldTransform);
 
 	UPROPERTY(ReplicatedUsing = OnRep_HostShip, VisibleInstanceOnly, BlueprintReadOnly, Category = "Boss|Ship")
 	TObjectPtr<AEnemyShip> HostShip = nullptr;

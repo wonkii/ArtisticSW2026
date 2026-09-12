@@ -2,6 +2,8 @@
 
 
 #include "Components/BaseHealthComponent.h"
+#include "Components/CombatPresentationComponent.h"
+#include "Components/EquipmentStatComponent.h"
 
 #include "AbilitySystemBlueprintLibrary.h"
 #include "AbilitySystemComponent.h"
@@ -52,6 +54,18 @@ void UBaseHealthComponent::InitializeWithAbilitySystem(UAbilitySystemComponent* 
 	UninitializeFromAbilitySystem();
 
 	AbilitySystemComponent = InAbilitySystemComponent;
+	if (GetOwner() && GetOwner()->HasAuthority())
+	{
+		if (auto* Stats = GetOwner()->FindComponentByClass<UEquipmentStatComponent>())
+		{
+			if (!Stats->RebindAbilitySystem(InAbilitySystemComponent))
+			{
+				Stats->Clear();
+				UE_LOG(LogBaseHealthFeedback, Warning, TEXT("Equipment stats could not rebind to the replacement ASC on %s."), *GetNameSafe(GetOwner()));
+			}
+		}
+	}
+	if (auto* Presenter = UCombatPresentationComponent::GetOrCreate(GetOwner())) Presenter->Initialize(InAbilitySystemComponent);
 
 	HealthChangedDelegateHandle = AbilitySystemComponent
 		->GetGameplayAttributeValueChangeDelegate(UBaseAttributeSet::GetHealthAttribute())
@@ -80,6 +94,8 @@ void UBaseHealthComponent::InitializeWithAbilitySystem(UAbilitySystemComponent* 
 
 void UBaseHealthComponent::UninitializeFromAbilitySystem()
 {
+	if (GetOwner())
+		if (auto* Presenter = GetOwner()->FindComponentByClass<UCombatPresentationComponent>()) Presenter->Uninitialize();
 	if (!AbilitySystemComponent)
 	{
 		return;
